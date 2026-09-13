@@ -1,0 +1,8 @@
+[
+  {"type": "GPS", "TimeUS": 1000000, "Lat": 48.0, "Lng": -3.0, "Alt": 100.0, "Spd": 10.0, "VZ": 2.0},
+  {"type": "ATT", "TimeUS": 1000000, "Roll": 1.0, "Pitch": 2.0},
+  {"type": "POS", "TimeUS": 1000000, "Lat": 48.0, "Lng": -3.0, "Alt": 99.0},
+  {"type": "GPS", "TimeUS": 2000000, "Lat": 48.0001, "Lng": -2.9999, "Alt": 105.0, "Spd": 12.0, "VZ": 3.0},
+  {"type": "ATT", "TimeUS": 2000000, "Roll": 3.0, "Pitch": 4.0},
+  {"type": "POS", "TimeUS": 2000000, "Lat": 48.0001, "Lng": -2.9999, "Alt": 104.0}
+]
