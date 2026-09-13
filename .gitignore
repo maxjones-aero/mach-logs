@@ -30,5 +30,6 @@ Desktop.ini
 *.bin
 !tests/fixtures/empty.bin
 *.mp4
+*.mov
 out/*
 !out/.gitkeep
