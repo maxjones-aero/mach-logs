@@ -62,6 +62,14 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.I
         return ImageFont.load_default(size=size)
 
 
+@lru_cache(maxsize=3)
+def _aircraft_asset(name: str) -> Image.Image:
+    """Load one of the packaged transparent aircraft silhouettes."""
+    path = Path(__file__).resolve().parents[1] / "assets" / f"aircraft-{name}.png"
+    with Image.open(path) as source:
+        return source.convert("RGBA")
+
+
 def _with_alpha(colour: RGBA, alpha: int) -> RGBA:
     return colour[0], colour[1], colour[2], max(0, min(255, alpha))
 
@@ -71,8 +79,13 @@ def _smoothstep(value: float) -> float:
     return value * value * (3 - 2 * value)
 
 
+def _wrap_degrees(value: float) -> float:
+    """Return an angle in the conventional [-180, 180) display range."""
+    return (value + 180.0) % 360.0 - 180.0
+
+
 class BroadcastRenderer:
-    """Render standalone RGBA overlays, blur mattes and review previews."""
+    """Render standalone RGBA overlays and their editorial mattes."""
 
     def __init__(
         self,
@@ -84,50 +97,66 @@ class BroadcastRenderer:
         self.config = config
         self.theme = theme
         self.scale = min(config.width / 1920, config.height / 1080)
-        self.speed_panel, self.path_panel, self.attitude_panel, self.timer_panel = self._layout()
+        (
+            self.speed_panel,
+            self.path_panel,
+            self.attitude_panel,
+            self.resource_panel,
+            self.timer_panel,
+        ) = self._layout()
         self.path_points = self._map_path_points()
         self.static_overlay = self._render_static_overlay()
         self.static_matte = self._render_static_matte()
-        self.preview_background = self._render_preview_background()
-        self.relative_altitude = timeline.altitude_metres - float(
-            np.nanmin(timeline.altitude_metres)
-        )
-        self.speed_max = max(float(np.nanpercentile(timeline.speed_metres_per_second, 98)), 1.0)
 
     def px(self, value: float) -> int:
         return max(1, round(value * self.scale))
 
-    def _layout(self) -> tuple[Rectangle, Rectangle, Rectangle, Rectangle]:
-        margin = self.px(54)
+    def _layout(self) -> tuple[Rectangle, Rectangle, Rectangle, Rectangle, Rectangle]:
+        # Use one optical safe-area inset for every widget on every outer edge.
+        margin = self.px(24)
         gap = self.px(18)
-        speed_width = self.px(272)
-        path_width = self.px(590)
+        speed_width = self.px(300)
+        # Keep every bottom widget out of the centre third, where the aircraft is framed.
+        path_width = self.px(300)
         attitude_width = self.px(370)
-        side_height = self.px(230)
+        resource_width = self.px(250)
+        speed_height = self.px(135)
+        attitude_height = self.px(230)
         path_height = self.px(300)
-        total_width = speed_width + path_width + attitude_width + gap * 2
-        left = (self.config.width - total_width) // 2
+        resource_height = self.px(190)
         bottom = self.config.height - margin
 
-        speed = Rectangle(left, bottom - side_height, left + speed_width, bottom)
-        path_left = speed.right + gap
-        path = Rectangle(path_left, bottom - path_height, path_left + path_width, bottom)
-        attitude_left = path.right + gap
+        attitude_left = margin
         attitude = Rectangle(
             attitude_left,
-            bottom - side_height,
+            bottom - attitude_height,
             attitude_left + attitude_width,
             bottom,
         )
-        timer_width = self.px(310)
-        timer_height = self.px(66)
+        speed_bottom = attitude.top - gap
+        speed = Rectangle(margin, speed_bottom - speed_height, margin + speed_width, speed_bottom)
+        resource = Rectangle(
+            self.config.width - margin - resource_width,
+            bottom - resource_height,
+            self.config.width - margin,
+            bottom,
+        )
+        path_bottom = resource.top - gap
+        path = Rectangle(
+            self.config.width - margin - path_width,
+            path_bottom - path_height,
+            self.config.width - margin,
+            path_bottom,
+        )
+        timer_width = self.px(330)
+        timer_height = self.px(72)
         timer = Rectangle(
             self.config.width - margin - timer_width,
             margin,
             self.config.width - margin,
             margin + timer_height,
         )
-        return speed, path, attitude, timer
+        return speed, path, attitude, resource, timer
 
     def _glass_panel(self, image: Image.Image, rectangle: Rectangle, radius: int) -> None:
         shadow_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
@@ -169,7 +198,7 @@ class BroadcastRenderer:
         draw.text(
             position,
             text,
-            font=_font(self.px(13), bold=True),
+            font=_font(self.px(18), bold=True),
             fill=self.theme.secondary,
             anchor=anchor,
         )
@@ -177,7 +206,13 @@ class BroadcastRenderer:
     def _render_static_overlay(self) -> Image.Image:
         image = Image.new("RGBA", (self.config.width, self.config.height), (0, 0, 0, 0))
         radius = self.px(20)
-        for panel in (self.speed_panel, self.path_panel, self.attitude_panel, self.timer_panel):
+        for panel in (
+            self.speed_panel,
+            self.path_panel,
+            self.attitude_panel,
+            self.resource_panel,
+            self.timer_panel,
+        ):
             self._glass_panel(image, panel, radius)
 
         draw = ImageDraw.Draw(image)
@@ -195,7 +230,12 @@ class BroadcastRenderer:
         self._label(
             draw,
             (self.attitude_panel.left + inset, self.attitude_panel.top + inset),
-            "ATTITUDE / ALTITUDE",
+            "THROTTLE / G LOADING",
+        )
+        self._label(
+            draw,
+            (self.resource_panel.left + inset, self.resource_panel.top + inset),
+            "BATTERY / FUEL",
         )
         self._label(
             draw,
@@ -204,18 +244,17 @@ class BroadcastRenderer:
         )
 
         accent_width = self.px(34)
-        for panel in (self.speed_panel, self.path_panel, self.attitude_panel):
+        for panel in (
+            self.speed_panel,
+            self.path_panel,
+            self.attitude_panel,
+            self.resource_panel,
+        ):
             y = panel.top + self.px(49)
             draw.line(
                 (panel.left + inset, y, panel.left + inset + accent_width, y),
                 fill=self.theme.accent,
                 width=self.px(2),
-            )
-        if len(self.path_points) > 1:
-            draw.line(
-                self.path_points,
-                fill=_with_alpha(self.theme.secondary, 28),
-                width=self.px(1.5),
             )
         return image
 
@@ -223,33 +262,29 @@ class BroadcastRenderer:
         image = Image.new("L", (self.config.width, self.config.height), 0)
         draw = ImageDraw.Draw(image)
         radius = self.px(20)
-        for panel in (self.speed_panel, self.path_panel, self.attitude_panel, self.timer_panel):
+        for panel in (
+            self.speed_panel,
+            self.path_panel,
+            self.attitude_panel,
+            self.resource_panel,
+            self.timer_panel,
+        ):
             draw.rounded_rectangle(panel.as_box(), radius=radius, fill=255)
         return image.filter(ImageFilter.GaussianBlur(self.px(7)))
 
-    def _render_preview_background(self) -> Image.Image:
-        width, height = self.config.width, self.config.height
-        mix = np.linspace(0, 1, height, dtype=np.float32)[:, np.newaxis]
-        colours = np.concatenate(
-            (
-                15 + 3 * mix,
-                28 + 14 * mix,
-                39 + 18 * mix,
-                np.full_like(mix, 255),
-            ),
-            axis=1,
-        ).astype(np.uint8)
-        pixels = np.repeat(colours[:, np.newaxis, :], width, axis=1)
-        image = Image.fromarray(pixels)
-
-        draw = ImageDraw.Draw(image)
-        grid = self.px(96)
-        grid_colour = (118, 160, 183, 17)
-        for x in range(0, width, grid):
-            draw.line((x, 0, x, height), fill=grid_colour, width=1)
-        for y in range(0, height, grid):
-            draw.line((0, y, width, y), fill=grid_colour, width=1)
-        return image
+    def _aircraft_icon(self, name: str, size: int) -> Image.Image:
+        """Return a centred, theme-coloured square aircraft icon for the current layout."""
+        source = _aircraft_asset(name)
+        icon = source.copy()
+        icon.thumbnail((size, size), Image.Resampling.LANCZOS)
+        tinted = Image.new("RGBA", icon.size, self.theme.primary)
+        tinted.putalpha(icon.getchannel("A"))
+        canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        canvas.alpha_composite(
+            tinted,
+            ((size - tinted.width) // 2, (size - tinted.height) // 2),
+        )
+        return canvas
 
     def _map_path_points(self) -> list[tuple[int, int]]:
         area = self.path_panel.inset(self.px(34))
@@ -281,50 +316,47 @@ class BroadcastRenderer:
         return min(fade_in, fade_out)
 
     def _draw_speed(self, draw: ImageDraw.ImageDraw, index: int) -> None:
-        speed_ms = float(self.timeline.speed_metres_per_second[index])
+        ground_ms = float(self.timeline.speed_metres_per_second[index])
         if self.config.units == "imperial":
-            speed = speed_ms * 2.236936
-            unit = "MPH"
-            maximum = self.speed_max * 2.236936
+            primary_factor, secondary_factor = 2.236936, 3.6
+            primary_unit, secondary_unit = "MPH", "KM/H"
         else:
-            speed = speed_ms * 3.6
-            unit = "KM/H"
-            maximum = self.speed_max * 3.6
+            primary_factor, secondary_factor = 3.6, 2.236936
+            primary_unit, secondary_unit = "KM/H", "MPH"
 
-        x = self.speed_panel.left + self.px(24)
-        y = self.speed_panel.top + self.px(73)
+        value_x = self.speed_panel.left + self.px(24)
+        y = self.speed_panel.top + self.px(67)
         draw.text(
-            (x, y),
-            f"{speed:03.0f}",
-            font=_font(self.px(64), bold=True),
+            (value_x, y),
+            f"{ground_ms * primary_factor:03.0f}",
+            font=_font(self.px(48), bold=True),
             fill=self.theme.primary,
             anchor="la",
         )
+        detail_x = self.speed_panel.left + self.px(172)
         draw.text(
-            (self.speed_panel.right - self.px(25), y + self.px(46)),
-            unit,
-            font=_font(self.px(14), bold=True),
+            (detail_x, y + self.px(4)),
+            primary_unit,
+            font=_font(self.px(16), bold=True),
             fill=self.theme.secondary,
-            anchor="ra",
+            anchor="la",
+        )
+        draw.text(
+            (detail_x, y + self.px(27)),
+            f"{ground_ms * secondary_factor:.0f} {secondary_unit}",
+            font=_font(self.px(18), bold=True),
+            fill=self.theme.secondary,
+            anchor="la",
         )
 
-        bar = Rectangle(
-            x,
-            self.speed_panel.bottom - self.px(38),
-            self.speed_panel.right - self.px(24),
-            self.speed_panel.bottom - self.px(32),
-        )
-        draw.rounded_rectangle(bar.as_box(), radius=self.px(3), fill=(255, 255, 255, 28))
-        proportion = max(0.0, min(1.0, speed / max(maximum, 1.0)))
-        fill_right = round(bar.left + bar.width * proportion)
-        if fill_right > bar.left:
-            draw.rounded_rectangle(
-                (bar.left, bar.top, fill_right, bar.bottom),
-                radius=self.px(3),
-                fill=self.theme.accent,
+    def _draw_path(self, image: Image.Image, index: int) -> None:
+        draw = ImageDraw.Draw(image)
+        if index > 0:
+            draw.line(
+                self.path_points[: index + 1],
+                fill=_with_alpha(self.theme.secondary, 70),
+                width=self.px(1.5),
             )
-
-    def _draw_path(self, draw: ImageDraw.ImageDraw, index: int) -> None:
         trail_frames = max(2, round(self.config.trail_seconds * self.config.fps))
         start = max(1, index - trail_frames)
         for point_index in range(start, index + 1):
@@ -337,27 +369,16 @@ class BroadcastRenderer:
             )
 
         current_x, current_y = self.path_points[index]
-        angle = -float(self.timeline.heading_radians[index])
-        length = self.px(14)
-        wing = self.px(7)
-        direction = (math.cos(angle), math.sin(angle))
-        perpendicular = (-direction[1], direction[0])
-        marker = [
-            (current_x + direction[0] * length, current_y + direction[1] * length),
-            (
-                current_x - direction[0] * length * 0.65 + perpendicular[0] * wing,
-                current_y - direction[1] * length * 0.65 + perpendicular[1] * wing,
-            ),
-            (
-                current_x - direction[0] * length * 0.35,
-                current_y - direction[1] * length * 0.35,
-            ),
-            (
-                current_x - direction[0] * length * 0.65 - perpendicular[0] * wing,
-                current_y - direction[1] * length * 0.65 - perpendicular[1] * wing,
-            ),
-        ]
-        draw.polygon(marker, fill=self.theme.primary)
+        heading_degrees = math.degrees(float(self.timeline.heading_radians[index]))
+        aircraft = self._aircraft_icon("top", self.px(32)).rotate(
+            180 + heading_degrees,
+            resample=Image.Resampling.BICUBIC,
+            expand=True,
+        )
+        image.alpha_composite(
+            aircraft,
+            (round(current_x - aircraft.width / 2), round(current_y - aircraft.height / 2)),
+        )
         draw.ellipse(
             (
                 current_x - self.px(2),
@@ -369,8 +390,8 @@ class BroadcastRenderer:
         )
 
     def _draw_attitude(self, image: Image.Image, draw: ImageDraw.ImageDraw, index: int) -> None:
-        centre_x = self.attitude_panel.left + self.px(91)
-        centre_y = self.attitude_panel.top + self.px(137)
+        centre_x = self.attitude_panel.left + self.px(120)
+        centre_y = self.attitude_panel.top + self.px(145)
         radius = self.px(54)
         size = radius * 2
         pitch = float(self.timeline.pitch_degrees[index])
@@ -388,21 +409,16 @@ class BroadcastRenderer:
         ImageDraw.Draw(circle_mask).ellipse((0, 0, size - 1, size - 1), fill=255)
         image.paste(horizon, (centre_x - radius, centre_y - radius), circle_mask)
 
+        aircraft = self._aircraft_icon("front", size)
+        image.alpha_composite(
+            aircraft,
+            (centre_x - radius, centre_y - radius - self.px(11)),
+        )
+
         draw.ellipse(
             (centre_x - radius, centre_y - radius, centre_x + radius, centre_y + radius),
             outline=self.theme.panel_border,
             width=self.px(2),
-        )
-        wing = self.px(22)
-        draw.line(
-            (centre_x - wing, centre_y, centre_x - self.px(6), centre_y),
-            fill=self.theme.accent,
-            width=self.px(3),
-        )
-        draw.line(
-            (centre_x + self.px(6), centre_y, centre_x + wing, centre_y),
-            fill=self.theme.accent,
-            width=self.px(3),
         )
         draw.ellipse(
             (
@@ -414,40 +430,161 @@ class BroadcastRenderer:
             fill=self.theme.accent,
         )
 
-        altitude = float(self.relative_altitude[index])
-        if self.config.units == "imperial":
-            altitude *= 3.28084
-            unit = "FT"
-        else:
-            unit = "M"
-        value_x = self.attitude_panel.left + self.px(175)
+        throttle = float(self.timeline.throttle_percent[index])
+        lateral_g = float(self.timeline.lateral_g[index])
+        axial_g = float(self.timeline.axial_g[index])
+        throttle_bar = Rectangle(
+            self.attitude_panel.left + self.px(25),
+            self.attitude_panel.top + self.px(75),
+            self.attitude_panel.left + self.px(39),
+            self.attitude_panel.bottom - self.px(28),
+        )
+        draw.rounded_rectangle(
+            throttle_bar.as_box(),
+            radius=self.px(5),
+            outline=self.theme.primary,
+            width=self.px(2),
+        )
+        throttle_inner = throttle_bar.inset(self.px(4))
+        throttle_top = round(throttle_inner.bottom - throttle_inner.height * throttle / 100.0)
+        if throttle_top < throttle_inner.bottom:
+            draw.rounded_rectangle(
+                (throttle_inner.left, throttle_top, throttle_inner.right, throttle_inner.bottom),
+                radius=self.px(2),
+                fill=self.theme.accent,
+            )
+
+        value_x = self.attitude_panel.left + self.px(207)
         draw.text(
-            (value_x, self.attitude_panel.top + self.px(78)),
-            f"{altitude:04.0f}",
-            font=_font(self.px(48), bold=True),
+            (value_x, self.attitude_panel.top + self.px(75)),
+            f"{throttle:.0f}%",
+            font=_font(self.px(28), bold=True),
             fill=self.theme.primary,
             anchor="la",
         )
         draw.text(
-            (self.attitude_panel.right - self.px(22), self.attitude_panel.top + self.px(116)),
-            f"REL ALT / {unit}",
-            font=_font(self.px(12), bold=True),
+            (self.attitude_panel.right - self.px(20), self.attitude_panel.top + self.px(88)),
+            "THROTTLE",
+            font=_font(self.px(14), bold=True),
             fill=self.theme.secondary,
             anchor="ra",
         )
         draw.text(
-            (value_x, self.attitude_panel.bottom - self.px(46)),
-            f"ROLL  {roll:+05.1f}°",
-            font=_font(self.px(12), bold=True),
-            fill=self.theme.secondary,
+            (value_x, self.attitude_panel.top + self.px(125)),
+            f"{lateral_g:+.1f}G",
+            font=_font(self.px(26), bold=True),
+            fill=self.theme.primary,
             anchor="la",
         )
         draw.text(
-            (value_x, self.attitude_panel.bottom - self.px(25)),
-            f"PITCH {pitch:+05.1f}°",
-            font=_font(self.px(12), bold=True),
+            (self.attitude_panel.right - self.px(20), self.attitude_panel.top + self.px(138)),
+            "LATERAL",
+            font=_font(self.px(14), bold=True),
             fill=self.theme.secondary,
+            anchor="ra",
+        )
+        draw.text(
+            (value_x, self.attitude_panel.top + self.px(175)),
+            f"{axial_g:+.1f}G",
+            font=_font(self.px(26), bold=True),
+            fill=self.theme.primary,
             anchor="la",
+        )
+        draw.text(
+            (self.attitude_panel.right - self.px(20), self.attitude_panel.top + self.px(188)),
+            "AXIAL",
+            font=_font(self.px(14), bold=True),
+            fill=self.theme.secondary,
+            anchor="ra",
+        )
+
+    def _draw_battery_fuel(self, draw: ImageDraw.ImageDraw, index: int) -> None:
+        battery_percent = float(self.timeline.battery_percent[index])
+        fuel_remaining = float(self.timeline.fuel_remaining_litres[index])
+        fuel_fraction = max(
+            0.0,
+            min(1.0, fuel_remaining / max(self.timeline.fuel_initial_litres, 1e-9)),
+        )
+        panel = self.resource_panel
+        battery_centre = panel.left + self.px(65)
+        fuel_centre = panel.right - self.px(65)
+        icon_top = panel.top + self.px(65)
+        icon_bottom = panel.top + self.px(137)
+        outline_width = self.px(3)
+
+        battery_box = Rectangle(
+            battery_centre - self.px(24),
+            icon_top,
+            battery_centre + self.px(24),
+            icon_bottom,
+        )
+        draw.rounded_rectangle(
+            battery_box.as_box(),
+            radius=self.px(7),
+            outline=self.theme.primary,
+            width=outline_width,
+        )
+        draw.rounded_rectangle(
+            (
+                battery_centre - self.px(10),
+                icon_top - self.px(8),
+                battery_centre + self.px(10),
+                icon_top + self.px(1),
+            ),
+            radius=self.px(2),
+            fill=self.theme.primary,
+        )
+        inner = battery_box.inset(self.px(7))
+        fill_top = round(inner.bottom - inner.height * battery_percent / 100.0)
+        if fill_top < inner.bottom:
+            draw.rounded_rectangle(
+                (inner.left, fill_top, inner.right, inner.bottom),
+                radius=self.px(3),
+                fill=self.theme.accent,
+            )
+        for segment in range(1, self.timeline.battery_cell_count):
+            y = round(inner.top + inner.height * segment / self.timeline.battery_cell_count)
+            draw.line(
+                (inner.left, y, inner.right, y),
+                fill=self.theme.panel_fill,
+                width=self.px(3),
+            )
+
+        fuel_box = Rectangle(
+            fuel_centre - self.px(25),
+            icon_top,
+            fuel_centre + self.px(25),
+            icon_bottom,
+        )
+        draw.rounded_rectangle(
+            fuel_box.as_box(),
+            radius=self.px(8),
+            outline=self.theme.primary,
+            width=outline_width,
+        )
+        fuel_inner = fuel_box.inset(self.px(7))
+        fuel_fill_top = round(fuel_inner.bottom - fuel_inner.height * fuel_fraction)
+        if fuel_fill_top < fuel_inner.bottom:
+            draw.rounded_rectangle(
+                (fuel_inner.left, fuel_fill_top, fuel_inner.right, fuel_inner.bottom),
+                radius=self.px(3),
+                fill=self.theme.accent,
+            )
+
+        value_y = panel.bottom - self.px(25)
+        draw.text(
+            (battery_centre, value_y),
+            f"{battery_percent:.0f}%",
+            font=_font(self.px(22), bold=True),
+            fill=self.theme.primary,
+            anchor="mm",
+        )
+        draw.text(
+            (fuel_centre, value_y),
+            f"{fuel_remaining:.2f} L",
+            font=_font(self.px(22), bold=True),
+            fill=self.theme.primary,
+            anchor="mm",
         )
 
     def _draw_timer(self, draw: ImageDraw.ImageDraw, index: int) -> None:
@@ -458,7 +595,7 @@ class BroadcastRenderer:
         draw.text(
             (self.timer_panel.right - self.px(18), self.timer_panel.top + self.px(15)),
             f"T+ {hours:02d}:{minutes:02d}:{seconds:02d}",
-            font=_font(self.px(22), bold=True),
+            font=_font(self.px(26), bold=True),
             fill=self.theme.primary,
             anchor="ra",
         )
@@ -470,8 +607,9 @@ class BroadcastRenderer:
         image = self.static_overlay.copy()
         draw = ImageDraw.Draw(image)
         self._draw_speed(draw, index)
-        self._draw_path(draw, index)
+        self._draw_path(image, index)
         self._draw_attitude(image, draw, index)
+        self._draw_battery_fuel(draw, index)
         self._draw_timer(draw, index)
 
         opacity = self._presentation_opacity(index)
@@ -490,8 +628,18 @@ class BroadcastRenderer:
             matte = matte.point(lambda value: round(value * opacity))
         return Image.merge("RGB", (matte, matte, matte))
 
-    def render_preview(self, index: int, overlay: Image.Image | None = None) -> Image.Image:
-        """Composite the overlay over a neutral grid for fast editorial review."""
-        preview = self.preview_background.copy()
-        preview.alpha_composite(overlay if overlay is not None else self.render_overlay(index))
-        return preview.convert("RGB")
+    def render_alpha_matte(
+        self,
+        index: int,
+        overlay: Image.Image | None = None,
+    ) -> Image.Image:
+        """Render the exact per-frame alpha channel as an RGB luma matte."""
+        if not 0 <= index < self.timeline.frame_count:
+            raise IndexError(f"frame index {index} is outside the telemetry timeline")
+        source = overlay if overlay is not None else self.render_overlay(index)
+        alpha = source.getchannel("A")
+        return Image.merge("RGB", (alpha, alpha, alpha))
+
+    def render_static_blur_matte(self) -> Image.Image:
+        """Render the full-strength feathered panel mask as a still image."""
+        return Image.merge("RGB", (self.static_matte,) * 3)

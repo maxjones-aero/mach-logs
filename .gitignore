@@ -28,6 +28,7 @@ Desktop.ini
 
 # Raw flight logs and generated media
 *.bin
+*.mat
 !tests/fixtures/empty.bin
 *.mp4
 *.mov

@@ -23,12 +23,12 @@ class Theme:
 THEMES = {
     "orbital": Theme(
         name="orbital",
-        panel_fill=(7, 14, 22, 166),
+        panel_fill=(7, 14, 22, 108),
         panel_border=(210, 232, 245, 58),
         primary=(244, 249, 252, 255),
-        secondary=(157, 177, 190, 235),
+        secondary=(194, 211, 222, 245),
         accent=(91, 214, 255, 255),
-        shadow=(0, 0, 0, 115),
+        shadow=(0, 0, 0, 92),
     ),
     "minimal": Theme(
         name="minimal",
@@ -71,7 +71,7 @@ class RenderConfig:
     width: int = 1920
     height: int = 1080
     fps: int = 30
-    title: str = "FLIGHT TELEMETRY"
+    title: str = "FLIGHT TIME"
     units: str = "imperial"
     trail_seconds: float = 12.0
     fade_seconds: float = 0.6

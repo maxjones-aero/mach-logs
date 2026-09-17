@@ -31,7 +31,7 @@ class FFmpegEncoder:
         self.kind = kind
         self.overwrite = overwrite
         self.process: subprocess.Popen[bytes] | None = None
-        self.expected_mode = "RGBA" if kind == "overlay" else "RGB"
+        self.expected_mode = "RGB"
 
     def _command(self) -> list[str]:
         ffmpeg = shutil.which("ffmpeg")
@@ -39,14 +39,13 @@ class FFmpegEncoder:
             raise RuntimeError(
                 "FFmpeg is required to render overlay video but was not found on PATH"
             )
-        if self.kind not in {"overlay", "matte", "preview"}:
+        if self.kind not in {"h264_overlay", "alpha_matte"}:
             raise ValueError(f"unsupported encoder kind: {self.kind}")
         if self.output.exists() and not self.overwrite:
             raise FileExistsError(
                 f"output already exists: {self.output}; use --overwrite to replace it"
             )
 
-        input_pixel_format = "rgba" if self.kind == "overlay" else "rgb24"
         command = [
             ffmpeg,
             "-hide_banner",
@@ -56,7 +55,7 @@ class FFmpegEncoder:
             "-f",
             "rawvideo",
             "-pixel_format",
-            input_pixel_format,
+            "rgb24",
             "-video_size",
             f"{self.width}x{self.height}",
             "-framerate",
@@ -65,49 +64,21 @@ class FFmpegEncoder:
             "pipe:0",
             "-an",
         ]
-        if self.kind == "overlay":
-            command.extend(
-                [
-                    "-c:v",
-                    "prores_ks",
-                    "-profile:v",
-                    "4",
-                    "-pix_fmt",
-                    "yuva444p10le",
-                    "-alpha_bits",
-                    "16",
-                    "-vendor",
-                    "apl0",
-                ]
-            )
-        elif self.kind == "matte":
-            command.extend(
-                [
-                    "-c:v",
-                    "prores_ks",
-                    "-profile:v",
-                    "3",
-                    "-pix_fmt",
-                    "yuv422p10le",
-                    "-vendor",
-                    "apl0",
-                ]
-            )
-        else:
-            command.extend(
-                [
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "medium",
-                    "-crf",
-                    "18",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-movflags",
-                    "+faststart",
-                ]
-            )
+        quality = "8" if self.kind == "alpha_matte" else "18"
+        command.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                quality,
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ]
+        )
         command.append(str(self.output))
         return command
 
